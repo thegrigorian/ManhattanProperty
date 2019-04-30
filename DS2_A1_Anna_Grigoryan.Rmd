@@ -1,0 +1,598 @@
+---
+title: "Assignment"
+author: "Anna Grigoryan"
+date: 'February 26, 2018 '
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+
+# Loading all the required packages 
+
+library(data.table)
+library(datasets)
+library(MASS)
+library(ISLR)
+library(caret)
+library(magrittr)
+library(skimr)
+library(GGally)
+library(broom)
+library(tidyverse)
+library(ggthemes)
+library(janitor)
+library(NbClust)
+library(factoextra)
+library(glmnet)
+library(kableExtra)
+
+# Set the ggplot package 
+
+theme_set(theme_bw())   
+```
+ 
+## 1. Supervised learning with penalized models and PCA 
+
+The project analyzes the dataset about property values in Manhattan. This dataset is borrowed from the book “R for Everyone” by Jared Lander. The goal will be to predict the logarithm of the property value: logTotalValue.
+
+```{r , echo=FALSE}
+data <- readRDS(url('http://www.jaredlander.com/data/manhattan_Train.rds')) %>% 
+  as.data.table()
+data[, logTotalValue := log(TotalValue)]
+data <- data[complete.cases(data)]
+```
+
+
+### a. Do a short exploration of data and find possible predictors of the target variable (logTotalValue).
+
+```{r, include=FALSE}
+skim(data)
+
+```
+
+Finally, out of the 47 variables, the following features will be taken under consideration:
+
+- Factors : BasementType, Built, Class, HistoricDistrict, Landmark, Proximity, SchoolDistrict.
+
+- Integers : BldgArea, ComArea, Council, LotArea, NumBldgs, StrgeArea, UnitsRes, UnitsTotal. 
+
+ - Numeric :NumFloors, BuiltFAR 
+
+
+Before we start the prediction, let!s look at the distrbution of the target variable we will be predicting, i.e. TotalValue and logarithmic transformation of it logTotalValue
+
+```{r, message=FALSE, echo=FALSE, fig.show='hold', out.width='50%'}
+ggplot(data, aes(x = TotalValue)) + geom_density()
+
+ggplot(data, aes(x = logTotalValue)) + geom_density()
+```
+
+
+As we can see TotalValue has long right-tail, thus using the logarithmic transformation instead will be a nice approach. As it can be noticed the density plot of the logTotalValue looks much better. Therefore we will choose our target variable as the logTotalValue.
+
+Before choosing the features to use in our model, we should look at the correlation matrix to see how the features are related to each other and to the target variable. 
+
+```{r, echo = FALSE, fig.show='hold', out.width='50%'}
+ggcorr(data)
+ggpairs(data, columns = c("logTotalValue", "BldgArea", "NumFloors", "BuiltFAR" , "UnitsTotal"))
+```
+
+Based on the correlation matrix we chose BldgArea, NumFloors, BuiltFAR, UnitsTotal and the target variable logTotalValue and analzed it.
+
+We can see the correlation coefficients are quite high.
+
+As we can't draw a correlation matrix for a factor variable, still we can choose if the target variable logTotalValue is different accross the different categories, my comparing for example the average of the logTotalValue among the 10 value the feature Built takes. Same was repeated for factor variables HistoricDistrict, Landmark and Proximity.
+
+```{r, cache=TRUE, message=FALSE, echo=FALSE}
+
+data$Built <- ordered(data$Built, levels=c("Unknown", "18th Century", "Prewar","Postwar","60s","70s","80s","90s","00s","10s"))
+
+t1 <- data %>%
+  group_by(Built) %>%
+  summarize(mean_value = mean(logTotalValue, na.rm=TRUE))
+
+t2 <- data %>%
+  group_by(HistoricDistrict) %>%
+  summarize(mean_value = mean(logTotalValue, na.rm=TRUE))
+
+t3 <- data %>%
+  group_by(Landmark) %>%
+  summarize(mean_value = mean(logTotalValue, na.rm=TRUE))
+
+t4 <- data %>%
+  group_by(Proximity) %>%
+  summarize(mean_value = mean(logTotalValue, na.rm=TRUE))
+
+
+knitr::kable(list(t1,t2,t3,t4)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+```
+
+Let's look at the boxplot for each. 
+
+
+```{r, message = FALSE,echo=FALSE, fig.align='center'}
+
+ggplot(data, aes(Landmark,logTotalValue)) + 
+  ggtitle("Spread of Log Value Grouped by Feature 'Landmark'") +
+  geom_boxplot()
+
+ggplot(data, aes(Built,logTotalValue)) + 
+  ggtitle("Spread of Log Value Grouped by Time Built") +
+  geom_boxplot() 
+
+ggplot(data, aes(Proximity,logTotalValue)) + 
+  ggtitle("Spread of Log Value Grouped by Feature 'Landmark'") +
+  geom_boxplot()
+
+
+ggplot(data, aes(HistoricDistrict,logTotalValue)) + 
+  ggtitle("Spread of Log Value Grouped by Feature 'Landmark'") +
+  geom_boxplot()
+
+
+```
+
+
+
+### b. Create a training and a test set, assigning 30% of observations to the training set.
+
+```{r, cache=TRUE}
+set.seed(42)
+training_ratio <- 0.3
+train_indices <- createDataPartition(
+  y = data[["logTotalValue"]],
+  times = 1,
+  p = training_ratio,
+  list = FALSE
+)
+data_train <- data[train_indices, ]
+data_test <- data[-train_indices, ]
+
+```
+
+
+### c. Use a linear regression to predict logTotalValue and use 10-fold cross validation to assess the predictive power.
+
+```{r, cache=TRUE, warning=FALSE, message=FALSE}
+fit_control <- trainControl(method = "cv", number = 10)
+
+set.seed(42)
+linear_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "lm",
+  preProcess = c("center", "scale"),
+  trControl = fit_control
+)
+
+linear_fit
+```
+Although this model has a really poor perfromance, based on the high value of the RMSE,but the R-squared is still high and we can use it as a benchmark model for comparison. However, we should also acknowledge that the R square is just high because we included many variables without penalization.
+
+### d. Use penalized linear models for the same task. Make sure to try LASSO, Ridge and Elastic Net models. Does the best model improve on the simple linear model?
+
+```{r,cache=TRUE, echo=FALSE}
+
+features <- setdiff(names(data), c("TotalValue", "logTotalValue"))
+
+x_train <- model.matrix( ~ . -1, data_train[, features, with = FALSE])
+
+# set up cross validation to choose lambda/ penalty term
+lambda_grid <- 10^seq(2,-5,length=100)
+
+fit_control1 <- trainControl(method = "cv", number = 10, selectionFunction = "oneSE")
+```
+
+```{r, echo=FALSE}
+# helper function to extract the coefficient sequence as a data.table
+get_glmnet_coeff_sequence <- function(glmnet_model) {
+  coeff_sequence <- coef(glmnet_model) %>% tidy() %>% as.data.table()
+  setnames(coeff_sequence, c("variable", "lambda_id", "value"))
+
+  lambdas <- data.table(
+    lambda = glmnet_model$lambda, 
+    lambda_id = paste0("s", 0:(length(glmnet_model$lambda) - 1))
+  )
+  
+  merge(coeff_sequence, lambdas, by = "lambda_id") 
+}
+```
+
+##  LASSO  
+Least absolute shrinkage and selection operator used for penalization. 
+
+```{r,cache=TRUE, warning=FALSE}
+set.seed(42)
+lasso_model <- glmnet(
+  x = x_train, y = data_train[["logTotalValue"]], 
+  family = "gaussian",
+  alpha = 1  # the lasso model
+)
+```
+
+
+```{r,include=FALSE}
+
+lasso_coeffs <- get_glmnet_coeff_sequence(lasso_model)
+
+selected_variables <- c("BldgArea", "NumFloors", "BuiltFAR" , "UnitsTotal")
+
+```
+
+```{r,echo=FALSE, fig.align='center'}
+plot(lasso_model, xvar = "lambda")
+```
+
+```{r, echo = FALSE, fig.align='center'}
+ggplot(
+  data = lasso_coeffs[variable %in% selected_variables],
+  aes(x = log(lambda), y = value)) +
+  geom_line() +
+  facet_wrap(~ variable, scales = "free_y", ncol = 1)
+```
+
+Determining the penality term using cross validation.
+
+```{r, cache=TRUE}
+set.seed(42)
+lasso_model_cv <- cv.glmnet(
+  x = x_train, y = data_train[["logTotalValue"]], 
+  family = "gaussian",
+  alpha = 1,
+  nfolds = 10
+)
+```
+
+```{r, echo=FALSE , message=TRUE}
+best_lambda <- lasso_model_cv$lambda.min
+message(paste0("The optimally chosen penalty parameter: ", best_lambda))
+
+highest_good_enough_lambda <- lasso_model_cv$lambda.1se
+message(paste0("The optimally chosen penalty parameter: ", highest_good_enough_lambda))
+```
+
+```{r,message=FALSE, echo = FALSE, fig.align='center'}
+
+plot(lasso_model_cv)
+```
+
+### LASSO - With Caret
+
+```{r,message=FALSE, warning=FALSE}
+tenpowers <- 10^seq(-1, -5, by = -1)
+
+lasso_tune_grid <- expand.grid(
+  "alpha" = c(1),
+  "lambda" = c(tenpowers, tenpowers / 2) 
+)
+
+set.seed(42)
+lasso_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = lasso_tune_grid,
+  trControl = fit_control
+)
+
+lasso_fit
+
+```
+##  RIDGE 
+
+```{r,cache=TRUE, warning=FALSE}
+set.seed(42)
+ridge_model <- glmnet(
+  x = x_train, y = data_train[["logTotalValue"]], 
+  family = "gaussian", # for continuous response
+  alpha = 0  # the ridge model
+)
+```
+
+```{r,echo=FALSE, fig.align='center'}
+###### Figure out how to do hover
+plot(ridge_model, xvar = "lambda")
+```
+```{r, include=FALSE}
+## get coefficients
+
+
+ridge_coeffs <- get_glmnet_coeff_sequence(ridge_model)
+```
+```{r, echo = FALSE, fig.align='center'}
+ggplot(
+  data = ridge_coeffs[variable %in% selected_variables],
+  aes(x = log(lambda), y = value)) +
+  geom_line() +
+  facet_wrap(~ variable, scales = "free_y", ncol = 1)
+
+
+#We can use cross-validation to determine the optimal penalty term weight. 
+#Two lambda values marked on the plot: one with the minimal CV RMSE, the other is the 
+#simplest model (highest lambda) which contains the optimal lambda's error within one 
+#standard deviation. That is, it gives the simplest model that is still "good enough".
+
+## cross validation to get lambda
+
+```
+
+```{r, cache=TRUE}
+set.seed(42)
+ridge_model_cv <- cv.glmnet(
+  x = x_train, y = data_train[["logTotalValue"]], 
+  family = "gaussian",
+  alpha = 0,
+  nfolds = 10
+)
+```
+
+```{r, echo=FALSE , message=TRUE}
+best_lambda <- ridge_model_cv$lambda.min
+message(paste0("The optimally chosen penalty parameter: ", best_lambda))
+
+highest_good_enough_lambda <- ridge_model_cv$lambda.1se
+message(paste0("The optimally chosen penalty parameter: ", highest_good_enough_lambda))
+```
+```{r,fig.align='center', echo=FALSE}
+plot(ridge_model_cv)
+```
+
+### RIDGE - With Caret
+
+Using the Ridge penalized regression on Caret model.
+
+```{r,message=FALSE, warning=FALSE}
+
+ridge_tune_grid <- expand.grid(
+  "alpha" = c(0),
+  "lambda" = seq(0.05, 0.5, by = 0.025)
+)
+
+set.seed(42)
+ridge_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = fit_control
+)
+
+ridge_fit
+```
+
+## ELASTIC NET
+
+```{r,message=FALSE, warning=FALSE}
+enet_tune_grid <- expand.grid(
+  "alpha" = seq(0, 1, by = 0.1),
+  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]])
+)
+
+set.seed(42)
+enet_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = enet_tune_grid,
+  trControl = fit_control
+)
+```
+
+```{r,include=FALSE}
+enet_fit
+```
+
+
+
+```{r,message=FALSE, warning=FALSE, echo=FALSE}
+resample_profile <- resamples(
+  list("linear" = linear_fit,
+       "ridge" = ridge_fit,
+       "lasso" = lasso_fit,
+       "elastic net" = enet_fit
+  )
+)
+
+summary(resample_profile)
+
+bwplot(resample_profile)
+
+model_differences <- diff(resample_profile)
+
+summary(model_differences)
+
+dotplot(model_differences)
+```
+
+
+
+### e. Which of the models you’ve trained is the “simplest one that is still good enough”? (Hint: explore adding selectionFunction = "oneSE" to the trainControl in caret’s train. What is its effect?).
+
+```{r,message=FALSE, warning=FALSE}
+set.seed(42)
+ridge_fit1 <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = fit_control1
+)
+
+ridge_fit1
+
+set.seed(42)
+lasso_fit1 <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = lasso_tune_grid,
+  trControl = fit_control1
+)
+
+lasso_fit1
+
+set.seed(42)
+enet_fit1 <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = enet_tune_grid,
+  trControl = fit_control1
+)
+```
+
+```{r, include=FALSE}
+enet_fit1
+```
+
+
+### f. Now try to improve the linear model by using PCA for dimensionality reduction. Center and scale your variables and use pcr to conduct a search for the optimal number of principal components. Does PCA improve the fit over the simple linear model? (Hint: there are many factor variables. Make sure to include large number of principal components such as 60 - 90 to your search as well.)
+
+```{r,message=FALSE, warning=FALSE}
+tune_grid <- data.frame(ncomp = 1:90)
+
+set.seed(857)
+pcr_fit <- train(logTotalValue ~ . -TotalValue, 
+                 data = data_train, 
+                 method = "pcr", 
+                 trControl = fit_control,
+                 tuneGrid = tune_grid,
+                 preProcess = c("center", "scale")
+)
+
+summary(pcr_fit)
+
+```
+
+### g. If you apply PCA prior to estimating penalized models via preProcess, does it help to achieve a better fit? (Hint: also include "nzv" to  preProcess to drop zero variance features). What is your intuition why this can be the case?
+
+```{r,message=FALSE, warning=FALSE}
+set.seed(42)
+lasso_fit2 <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale","pca", "nzv"),
+  tuneGrid = lasso_tune_grid,
+  trControl = fit_control
+)
+
+lasso_fit2
+
+set.seed(42)
+ridge_fit2 <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale" ,"pca", "nzv"),
+  tuneGrid = ridge_tune_grid,
+  trControl = fit_control
+)
+
+ridge_fit2
+```
+
+
+### h. Select the best model of those you’ve trained. Evaluate your preferred model on the test set.
+
+ Elastic Net, and it produces the following RMSE on test
+```{r,message=FALSE, warning=FALSE, echo=FALSE}
+
+RMSE(predict(enet_fit, newdata = data_test), data_test[["logTotalValue"]])
+```
+
+## 2. Clustering on the USArrests dataset  
+
+```{r, include=FALSE}
+
+data <- USArrests
+# data <- data.table(data, keep.rownames = TRUE)
+# setnames(data, "rn", "state")
+print(skim(data))
+
+## maybe I should somehow look at the scale of variables. demean?
+```
+
+### a. Determine the optimal number of clusters as indicated by NbClust heuristics.
+
+```{r}
+nb <- NbClust(data, method = "kmeans", 
+              min.nc = 2, max.nc = 10, index = "all")
+```
+
+### b. Use the k-means method to cluster states using the number of clusters found in a) and anything else that you think that makes sense. Plot observations colored by clusters in the space of urban population and another (crime-related) variable. (See example code from class, use  factor(km$cluster) to create a vector of class labels).
+
+```{r, cache=TRUE}
+km <- kmeans(data, centers = 2)
+
+data_w_clusters <- cbind(data, 
+                         data.table("cluster" = factor(km$cluster)))
+```
+
+```{r, echo=FALSE, fig.show='hold', out.width='50%'}
+ggplot(data_w_clusters, 
+       aes(x = UrbanPop, y = Murder, color = cluster)) + 
+  geom_point()
+
+fviz_nbclust(nb)
+```
+
+### c. Repeat clustering, this time relying on hierarchical clustering. Display the dendrogram and discuss how many clusters do you think would make the most sense.
+
+```{r, cache=TRUE}
+data_distances <- dist(data)
+
+hc_complete <- hclust(data_distances, method = "complete")
+fviz_dend(hc_complete, k = 2)
+fviz_dend(hc_complete, k = 3)
+
+hc_avg <- hclust(data_distances, method = "average")
+fviz_dend(hc_avg, k = 2)
+fviz_dend(hc_avg, k = 3)
+```
+
+3 clusters make the most sense.
+
+### d. Perform PCA and get the first two principal component coordinates for all observations 
+
+```{r, message=FALSE, cache=TRUE}
+pre_process <- preProcess(data, method = c("center", "scale", "pca"))
+pre_process
+pre_process$rotation
+
+
+pca_result <- prcomp(data, scale. = TRUE)
+print(pca_result)
+first_two_pc <- data.table(pca_result$x[, 1:2])
+```
+
+### e. Plot clusters of your choice from the previous points in the coordinate system defined by the first two principal components. How do clusters relate to these?
+
+```{r, include=FALSE}
+nb <- NbClust(first_two_pc, method = "kmeans", 
+              min.nc = 2, max.nc = 5, index = "all")
+km <- kmeans(first_two_pc, centers = 4)
+
+first_two_pc_w_clusters <- cbind(first_two_pc, 
+                         data.table("cluster" = factor(km$cluster)))
+```
+
+```{r, fig.align='center', echo=FALSE, message=FALSE}
+ggplot(first_two_pc_w_clusters, 
+       aes(x = PC1, y = PC2, color=cluster)) + 
+  geom_point()
+
+```
